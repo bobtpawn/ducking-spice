@@ -1,0 +1,329 @@
+package eeevil;
+
+import battlecode.common.Direction;
+import battlecode.common.GameConstants;
+import battlecode.common.RobotController;
+import battlecode.common.RobotType;
+import battlecode.common.*;
+import java.util.*;
+
+public class RobotPlayer {
+	static Random rand;
+	static RobotController rc;
+	static MapLocation home;	// Our HQ
+	static MapLocation away;	// Their HQ
+	
+	// Main method.  Whe the robot gets created, this function is called
+	public static void run(RobotController inRC) throws GameActionException{
+		rc = inRC;
+		rand = new Random();
+		home = rc.senseHQLocation();
+		away = rc.senseEnemyHQLocation();
+		// A robot's type never changes, so call the right function and never come back.		
+		switch(rc.getType()){
+			case HQ: HQCode();
+			case PASTR: PASTRCode();
+			case SOLDIER: cowboyCode();
+		}
+	}
+	
+	// All cowboys run this function
+	private static void cowboyCode() throws GameActionException{
+		boolean weHaveAPASTR = rc.sensePastrLocations(rc.getTeam()).length>0;
+		// First, make sure we have a PASTR next to the HQ
+		if(!weHaveAPASTR && rc.senseRobotCount()<2){
+			// destination = opposite side of our HQ from theirs
+			MapLocation destination = home.add(home.directionTo(away).opposite());
+			// Move to destination (straight line)
+			while(!rc.getLocation().equals(destination)){
+				while(!rc.canMove(rc.getLocation().directionTo(destination))){
+					rc.yield();
+				}
+				rc.move(rc.getLocation().directionTo(destination));
+				hold();
+			}
+			rc.construct(RobotType.PASTR);
+			hold();
+		}
+		
+		// Otherwise, if we don't have very many robots, start herding cows toward the HQ
+		//   3 robots will take the three directions, 90o right from enemy HQ, 90o left from
+		//   enemy HQ, and directly away from enemy HQ.  Each robots claims a certain
+		//   direction by posting its ID in a particular channel.  We check the entry in the
+		//   channel against the list of robot IDs so that we can fill in, in case one
+		//   cowboy gets killed.
+		if(rc.senseRobotCount()<6){
+			Robot[] allFriendlies = rc.senseNearbyGameObjects(Robot.class, 1000000, rc.getTeam());
+			for(int i=0;i<3;i++){
+				boolean directionTaken = false;
+				directionTaken = rc.readBroadcast(i)!=0;
+				if(!directionTaken){
+					rc.broadcast(i,rc.getRobot().getID());	// Call dibs on this direction
+					Direction direction = home.directionTo(away).rotateRight().rotateRight();
+					for(int j=0;j<i;j++){
+						direction = direction.rotateRight().rotateRight();
+					}
+					// Go herd cows from that direction (like a piston)
+					piston(direction);
+				}
+			}
+		}else{
+			rustle();	// We already have herders.  Go kill some cows.
+		}
+	}
+	
+	// The HQ runs this function(){
+	private static void HQCode() throws GameActionException{
+		// Maintain population of 5 robots
+		while(true){
+			if(rc.senseRobotCount()<7){	// PASTRs count as 2 robots, 3 pistons, and 2 rustlers
+				// Try to spawn a robot 90o right of the enemy HQ
+				Direction dir = rc.getLocation().directionTo(away).rotateRight().rotateRight();
+				if(rc.canMove(dir)){
+					rc.spawn(dir);
+					hold();
+				}else{
+					rc.yield();
+				}
+			}else{	// If we already have 4 cowboys and a PASTR, attack any enemies nearby
+				Robot[] targets = rc.senseNearbyGameObjects(Robot.class, RobotType.HQ.sensorRadiusSquared, rc.getTeam().opponent());
+				for(Robot target:targets){
+					MapLocation targetLocation = rc.senseRobotInfo(target).location;
+					// Just shoot at the first thing you see
+					if(rc.canAttackSquare(targetLocation)){
+						rc.attackSquare(targetLocation);
+						break;
+					}	
+				}
+				rc.yield();
+				hold();
+			}
+		}
+	}
+	
+	// All PASTRs run this function
+	// Note that there is no penalty for using ALL of the bytecodes here
+	private static void PASTRCode() throws GameActionException{
+		while(true){
+			rc.yield();
+		}
+	}
+
+	// ====================Helper functions======================	
+	
+	// Move to destination attacking everything on the way
+	private static void attackTo(MapLocation destination) throws GameActionException{
+		// TODO: Implement this
+		rc.yield();	
+	}
+	
+	// Returns true if robot can move in this direction
+	// Otherwise, if there is an enemy there, destroy it and then return true
+	// Otherwise, if one of our cowboys is there, wait for it to move
+	// Otherwise, return false.
+	private static boolean canDestroyMove(Direction direction) throws GameActionException{
+		while(!rc.canMove(direction)){
+			GameObject obstacle = rc.senseObjectAtLocation(rc.getLocation().add(direction));
+			if(obstacle==null){
+				return false;	// We can't move there, but there's nothing in the way -> must be impassable
+			}else if(obstacle.getTeam().equals(rc.getTeam().opponent())){
+				destroy(rc.getLocation().add(direction));
+				continue;	// We killed it, but maybe something else has moved in the way
+			}
+			// Only way we get here is if an ally is in the way.
+			Robot thatGuy = rc.senseNearbyGameObjects(Robot.class,rc.getLocation().add(direction),1,rc.getTeam())[0];
+			RobotInfo aboutThatGuy = rc.senseRobotInfo(thatGuy);
+			if(aboutThatGuy.type==RobotType.SOLDIER && !aboutThatGuy.isConstructing){
+				if(rc.readBroadcast(7)==rc.getRobot().getID()){	// I'm in his way
+					while(!rc.canMove(direction)){
+						direction = direction.rotateRight();
+					}
+					rc.move(direction);
+					return false;	// Note that this completely screws the state of the pathfinding algorithm
+				}
+				rc.broadcast(7,thatGuy.getID());	// Get the *$%# out of my way, $&^#*!
+				rc.yield();
+				continue;
+			}else{	// It's one of our buildings or a soldier who is making a building -> go around
+				return false;
+			}
+		}
+		return true;
+	}
+	
+	// Keep attacking a square until it is empty
+	private static void destroy(MapLocation target) throws GameActionException{
+		while(rc.senseObjectAtLocation(target)!=null && rc.senseObjectAtLocation(target).getTeam().equals(rc.getTeam().opponent())){
+			rc.attackSquare(target);
+			hold();
+		}
+	}
+	
+	// Given a list of squares, find the one that has the most cows
+	private static MapLocation findSquareWithMostCows(MapLocation[] searchLocations) throws GameActionException{
+		double mostCows = 0;
+		MapLocation locationToAttack = searchLocations[0];
+		for(MapLocation searchLocation:searchLocations){
+			double foundCows = rc.senseCowsAtLocation(searchLocation);
+			if(foundCows>mostCows){
+				mostCows = foundCows;
+				locationToAttack = searchLocation;
+			}
+		}
+		return locationToAttack;
+	}
+	
+	// Wait until you can do something again
+	private static void hold(){
+		while(!rc.isActive())
+			rc.yield();
+	}
+	
+	// Move to destination ignoring everything on the way
+	private static void moveTo(MapLocation destination) throws GameActionException{
+		// TODO: Implement this
+		rc.yield();
+	}
+	
+	// Sneak away from the HQ, then come running back, pushing cows.
+	private static void piston(Direction direction) throws GameActionException{
+		// First, get on the right side of the HQ
+		Direction heading = rc.getLocation().directionTo(home).rotateRight();
+		// Follow along the outside of the HQ (and whatever else is there), keeping
+		//   it on your right
+		while(!home.directionTo(rc.getLocation()).equals(direction)){
+			while(!rc.canMove(heading)){
+				rc.yield();
+			}
+			rc.sneak(heading); // We don't want to scare any cows that are already on their way in.
+			heading = heading.rotateLeft();
+			hold();
+		}
+		
+		// Now, sneak out as far as you can and then run back
+		while(true){
+			while(rc.canMove(direction)){
+				rc.sneak(direction);
+				hold();
+			}
+			while(rc.getLocation().distanceSquaredTo(home)>GameConstants.MOVEMENT_SCARE_RANGE && rc.canMove(direction.opposite())){
+				rc.move(direction.opposite());
+				hold();
+			}
+		}
+	}
+	
+	// Go murder their cows
+	private static void rustle() throws GameActionException{
+		while(true){
+			MapLocation[] targets = rc.sensePastrLocations(rc.getTeam().opponent());
+			Collections.reverse(Arrays.asList(targets));
+			for(MapLocation target:targets){
+				rc.setIndicatorString(1,"Going to kills cows near "+Integer.toString(target.x)+","+Integer.toString(target.y));
+				// Crappy pathfinding algorithm to reach target.  This should really be its own class.
+				int followingEdge = 0;	// Not following an edge
+				int windingNumber = 0;	// How much have we turned in total?  (must be close to 0 for us to break off the edge and start going toward the target again)
+				Direction heading = rc.getLocation().directionTo(target);
+				while(rc.getLocation().distanceSquaredTo(target)>2){
+					Direction bestHeading = rc.getLocation().directionTo(target);
+					if(followingEdge == 0){	// Not following an edge
+						rc.setIndicatorString(0,"Not following an edge");
+						if(canDestroyMove(bestHeading)){
+							rc.move(bestHeading);
+							hold();
+						}else if(canDestroyMove(bestHeading.rotateRight())){
+							followingEdge = 1;	// Following to the right
+							heading = bestHeading.rotateRight();
+							windingNumber = windingNumber + 1;
+							rc.move(heading);
+							hold();
+							continue;
+						}else if(canDestroyMove(bestHeading.rotateLeft())){
+							followingEdge = 2;	// Following to the left
+							heading = bestHeading.rotateLeft();
+							windingNumber = windingNumber + 1;
+							rc.move(heading);
+							hold();
+							continue;
+						}else{
+							followingEdge = 1; //Following to the right
+							heading = bestHeading.rotateRight().rotateRight();
+							windingNumber = windingNumber + 2;
+							continue;
+						}
+					}else if(followingEdge == 1){	// Following an edge to the right
+						rc.setIndicatorString(0,"Following an edge to the right: "+Integer.toString(windingNumber));
+						Direction desiredHeading = heading.opposite().rotateRight().rotateRight();
+						int accumulatedTurn = -2;
+						while(!canDestroyMove(desiredHeading)){
+							if(accumulatedTurn == 0 && rc.senseTerrainTile(rc.getLocation().add(desiredHeading)).equals(TerrainTile.OFF_MAP)){	// (Map edge is dead ahead)
+								followingEdge = 2; 	// Turn around and start following on the left
+								heading = heading.opposite();
+								windingNumber = 4-windingNumber;	// 4 because we u-turn, - because we have switched directions
+								break;
+							}
+							desiredHeading = desiredHeading.rotateRight();
+							accumulatedTurn = accumulatedTurn + 1;
+						}
+						if(canDestroyMove(desiredHeading)){	// Could end up here either because we can move OR because we're turning around.
+							windingNumber = windingNumber + accumulatedTurn;
+							heading = desiredHeading;
+							if(heading.equals(bestHeading) && Math.abs(windingNumber)<3){
+								followingEdge = 0;	//	Break away from the edge
+								windingNumber = 0;
+							}
+							rc.move(desiredHeading);
+							hold();
+						}
+					}else if(followingEdge == 2){
+						rc.setIndicatorString(0,"Following an edge to the left: "+Integer.toString(windingNumber));
+						Direction desiredHeading = heading.opposite().rotateLeft().rotateLeft();
+						int accumulatedTurn = -2;
+						while(!canDestroyMove(desiredHeading)){
+							if(accumulatedTurn == 0 && rc.senseTerrainTile(rc.getLocation().add(desiredHeading)).equals(TerrainTile.OFF_MAP)){	// (Map edge is dead ahead)
+								followingEdge = 1; 	// Turn around and start following on the right
+								heading = heading.opposite();
+								windingNumber = 4-windingNumber;	// 4 because we u-turn, - because we have switched directions
+								break;
+							}
+							desiredHeading = desiredHeading.rotateLeft();
+							accumulatedTurn = accumulatedTurn + 1;
+						}
+						if(canDestroyMove(desiredHeading)){	// Could end up here either because we can move OR because we're turning around.
+							windingNumber = windingNumber + accumulatedTurn;
+							heading = desiredHeading;
+							if(heading.equals(bestHeading) && Math.abs(windingNumber)<3){
+								followingEdge = 0;	// Break away from the edge
+								windingNumber = 0;
+							}
+							rc.move(desiredHeading);
+							hold();
+						}
+					}
+				}
+				// Kill cows
+				Direction toTarget = rc.getLocation().directionTo(target);
+				MapLocation searchCenter = target.add(toTarget);
+				MapLocation[] searchLocations;
+				if(toTarget.isDiagonal()){
+					if(canDestroyMove(toTarget.rotateLeft())){
+						rc.move(toTarget.rotateLeft());
+						hold();
+					}else if(canDestroyMove(toTarget.rotateRight())){
+						rc.move(toTarget.rotateRight());
+						hold();
+					}else{
+						destroy(target);	// Screw it, this is hard.  Just kill it.
+						continue;	// next target
+					}
+				}
+				for(int i=0;i<2;i++){	// Shoot twice
+					MapLocation locationToAttack = findSquareWithMostCows(MapLocation.getAllMapLocationsWithinRadiusSq(target,GameConstants.PASTR_RANGE));
+					rc.setIndicatorString(2,"Attacking "+Integer.toString(locationToAttack.x)+","+Integer.toString(locationToAttack.y));
+					rc.attackSquare(locationToAttack);
+					hold();	
+				}			
+			}
+		}		
+	}	
+}
